@@ -1,5 +1,6 @@
 // Game Loop 2v2 - Main game loop integration for 2v2 gameplay
 
+import { Vector3 } from 'three';
 import { PlayerController } from './player_controller_2v2.js';
 import { InputHandler } from './input_handler_2v2.js';
 import { ScreenwatchClient } from './screenwatch_client.js';
@@ -7,6 +8,9 @@ import { ScreenwatchUI } from './screenwatch_ui.js';
 import { ARENA_MAP, createArenaGeometry } from './map_arena.js';
 import { serializePlayerInput, serializeEntityUpdate } from './network_protocol_2v2.js';
 import { NetworkClient } from './network_client.js';
+import { PlayerRenderer } from './player_renderer.js';
+import { HUD2v2 } from './hud_2v2.js';
+import { CombatSystem } from './combat_system.js';
 
 export class GameLoop2v2 {
   constructor(renderer, scene, networkClient = null) {
@@ -25,6 +29,11 @@ export class GameLoop2v2 {
     // Screenwatch
     this.screenwatch = null;
     this.screenwatchUI = null;
+    
+    // Rendering
+    this.playerRenderer = new PlayerRenderer(scene);
+    this.hud = new HUD2v2(document.body);
+    this.combatSystem = null;
   }
 
   async initialize(localPlayerId, teamId, teammatePeerId, roomId = 'dev-room') {
@@ -38,6 +47,19 @@ export class GameLoop2v2 {
     this.localPlayer = new PlayerController(spawnSquare.position.clone());
     this.localPlayer.id = localPlayerId;
     this.localPlayer.teamId = teamId;
+    this.localPlayer.health = 100;
+    this.localPlayer.shield = 0;
+    this.localPlayer.currentWeapon = 'BATTLE_RIFLE';
+    this.localPlayer.ammo = Infinity;
+    this.localPlayer.maxAmmo = Infinity;
+    this.localPlayer.yaw = 0;
+    this.localPlayer.pitch = 0;
+    
+    // Create player mesh
+    this.playerRenderer.createPlayerModel(localPlayerId, teamId);
+    
+    // Initialize combat system
+    this.combatSystem = new CombatSystem(this.scene, this.remotePlayers, this.networkClient);
     
     // Create input handler
     this.inputHandler = new InputHandler(this.renderer.domElement);
@@ -88,6 +110,14 @@ export class GameLoop2v2 {
       
       this.networkClient.on('SCREENWATCH_ICE_CANDIDATE', (data) => {
         this.screenwatch.receiveICECandidate(data.candidate);
+      });
+      
+      this.networkClient.on('KILL_EVENT', (data) => {
+        this.hud.addKillFeed(
+          `Player ${data.killerId}`,
+          `Player ${data.victimId}`,
+          data.weapon
+        );
       });
     } catch (e) {
       console.error('Failed to connect to server:', e);
@@ -166,6 +196,43 @@ export class GameLoop2v2 {
     
     // Update local player
     this.localPlayer.update(inputState, deltaTime);
+    this.localPlayer.yaw = inputState.yaw;
+    this.localPlayer.pitch = inputState.pitch;
+    
+    // Handle weapon firing
+    if (inputState.fireWeapon) {
+      const direction = new Vector3(0, 0, -1);
+      direction.applyAxisAngle(new Vector3(0, 1, 0), inputState.yaw);
+      direction.applyAxisAngle(new Vector3(1, 0, 0), inputState.pitch);
+      
+      this.combatSystem.fireWeapon(
+        this.localPlayer,
+        direction,
+        this.localPlayer.position
+      );
+    }
+    
+    // Update projectiles
+    this.combatSystem.updateProjectiles(deltaTime);
+    
+    // Update player rendering
+    this.playerRenderer.updatePlayerPosition(
+      this.localPlayer.id,
+      this.localPlayer.position,
+      { yaw: inputState.yaw, pitch: inputState.pitch }
+    );
+    
+    // Update remote players rendering
+    for (const [playerId, player] of this.remotePlayers.entries()) {
+      this.playerRenderer.updatePlayerPosition(
+        playerId,
+        player.position,
+        { yaw: player.yaw || 0, pitch: player.pitch || 0 }
+      );
+    }
+    
+    // Update HUD
+    this.hud.update({ teams: [{ kills: 0 }, { kills: 0 }] }, this.localPlayer);
     
     // Send input to server
     this.sendPlayerInput(inputState);
@@ -191,9 +258,18 @@ export class GameLoop2v2 {
       
       if (!this.remotePlayers.has(playerData.id)) {
         const remotePlayer = new PlayerController(
-          new (require('three')).Vector3(playerData.position.x, playerData.position.y, playerData.position.z)
+          new Vector3(playerData.position.x, playerData.position.y, playerData.position.z)
         );
         remotePlayer.id = playerData.id;
+        remotePlayer.teamId = playerData.teamId;
+        remotePlayer.health = playerData.health || 100;
+        remotePlayer.shield = playerData.shield || 0;
+        remotePlayer.yaw = playerData.rotation?.yaw || 0;
+        remotePlayer.pitch = playerData.rotation?.pitch || 0;
+        
+        // Create mesh for remote player
+        this.playerRenderer.createPlayerModel(playerData.id, playerData.teamId);
+        
         this.remotePlayers.set(playerData.id, remotePlayer);
       }
       
@@ -204,6 +280,10 @@ export class GameLoop2v2 {
         isGrounded: playerData.isGrounded,
         stamina: playerData.sprintStamina
       });
+      remotePlayer.health = playerData.health || 100;
+      remotePlayer.shield = playerData.shield || 0;
+      remotePlayer.yaw = playerData.rotation?.yaw || 0;
+      remotePlayer.pitch = playerData.rotation?.pitch || 0;
     }
   }
 
