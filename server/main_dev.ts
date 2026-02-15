@@ -1,13 +1,12 @@
 // Development Server - Simple WebSocket server for local 2v2 testing
 
 import { serve } from "https://deno.land/std@0.208.0/http/server.ts";
-import { WebSocketServer } from "https://deno.land/x/websockets@v0.1.9/mod.ts";
 
 import { GameServer2v2 } from "./game_server_2v2.ts";
 
 interface ClientConnection {
   id: string;
-  ws: any;
+  socket: WebSocket;
   roomId: string;
   teamId: number;
   playerId: number;
@@ -16,45 +15,67 @@ interface ClientConnection {
 const clients = new Map<string, ClientConnection>();
 const gameServers = new Map<string, GameServer2v2>();
 
-const wss = new WebSocketServer(8000);
-
 console.log("🎮 End of Times Development Server");
 console.log("📡 WebSocket listening on ws://localhost:8000");
-console.log("🌐 Open http://localhost:8080 in browser (run live-server in root)");
 
-wss.on("connection", async (ws: any) => {
-  const clientId = crypto.randomUUID();
-  console.log(`✅ Client connected: ${clientId}`);
+const handler = (req: Request): Response => {
+  // Upgrade HTTP to WebSocket
+  if (req.headers.get("upgrade") === "websocket") {
+    const { socket, response } = Deno.upgradeWebSocket(req);
+    
+    const clientId = crypto.randomUUID();
+    console.log(`✅ Client connected: ${clientId}`);
 
-  ws.on("message", (msg: string) => {
-    try {
-      const data = JSON.parse(msg);
-      handleMessage(clientId, ws, data);
-    } catch (e) {
-      console.error("Failed to parse message:", e);
-    }
-  });
+    socket.onmessage = (event) => {
+      try {
+        const data = JSON.parse(event.data);
+        handleMessage(clientId, socket, data);
+      } catch (e) {
+        console.error("Failed to parse message:", e);
+      }
+    };
 
-  ws.on("close", () => {
-    console.log(`❌ Client disconnected: ${clientId}`);
-    const client = clients.get(clientId);
-    if (client) {
-      clients.delete(clientId);
-      // TODO: Remove from game server
-    }
-  });
+    socket.onclose = () => {
+      console.log(`❌ Client disconnected: ${clientId}`);
+      const client = clients.get(clientId);
+      if (client) {
+        clients.delete(clientId);
+      }
+    };
 
-  ws.on("error", (e: any) => {
-    console.error(`⚠️ WebSocket error for ${clientId}:`, e);
-  });
-});
+    socket.onerror = (e) => {
+      console.error(`⚠️ WebSocket error for ${clientId}:`, e);
+    };
 
-function handleMessage(clientId: string, ws: any, data: any) {
+    return response;
+  }
+
+  // Serve index.html for root
+  if (req.url.endsWith("/") || req.url === "") {
+    return new Response(
+      `<!DOCTYPE html>
+<html>
+<head><title>End of Times</title></head>
+<body style="background: #000; color: #0f0; font-family: monospace; padding: 20px;">
+  <h1>🎮 End of Times Server Running</h1>
+  <p>WebSocket: ws://localhost:8000</p>
+  <p>HTTP Server: http://localhost:8080</p>
+  <p>Open browser: http://localhost:8080/index_dev.html</p>
+</body>
+</html>`,
+      { headers: { "content-type": "text/html" } }
+    );
+  }
+
+  return new Response("Not Found", { status: 404 });
+};
+
+function handleMessage(clientId: string, socket: WebSocket, data: any) {
   const { type } = data;
 
   switch (type) {
     case "PLAYER_JOIN":
-      handlePlayerJoin(clientId, ws, data);
+      handlePlayerJoin(clientId, socket, data);
       break;
     case "PLAYER_INPUT":
       handlePlayerInput(clientId, data);
@@ -82,6 +103,110 @@ function handleMessage(clientId: string, ws: any, data: any) {
   }
 }
 
+function handlePlayerJoin(clientId: string, socket: WebSocket, data: any) {
+  const { roomId, teamId, playerId } = data;
+
+  console.log(`🎮 Player ${playerId} joining room ${roomId} (team ${teamId})`);
+
+  const client: ClientConnection = {
+    id: clientId,
+    socket,
+    roomId,
+    teamId,
+    playerId
+  };
+  clients.set(clientId, client);
+
+  if (!gameServers.has(roomId)) {
+    console.log(`📦 Creating game server for room: ${roomId}`);
+    const gameServer = new GameServer2v2(roomId);
+    gameServers.set(roomId, gameServer);
+    startGameLoop(roomId, gameServer);
+  }
+
+  const gameServer = gameServers.get(roomId)!;
+  gameServer.registerPlayer(clientId, teamId, playerId, socket);
+
+  socket.send(
+    JSON.stringify({
+      type: "PLAYER_JOIN_CONFIRMED",
+      clientId,
+      roomId,
+      playerId
+    })
+  );
+}
+
+function handlePlayerInput(clientId: string, data: any) {
+  const client = clients.get(clientId);
+  if (!client) return;
+
+  const gameServer = gameServers.get(client.roomId);
+  if (!gameServer) return;
+
+  gameServer.processPlayerInput(clientId, data.data);
+}
+
+function handleScreenwatchOffer(clientId: string, data: any) {
+  const client = clients.get(clientId);
+  if (!client) return;
+
+  const teammatePeerId = data.to;
+  const teammate = Array.from(clients.values()).find(
+    (c) => c.id === teammatePeerId && c.roomId === client.roomId
+  );
+
+  if (teammate) {
+    teammate.socket.send(
+      JSON.stringify({
+        type: "SCREENWATCH_OFFER",
+        offer: data.offer,
+        from: clientId
+      })
+    );
+  }
+}
+
+function handleScreenwatchAnswer(clientId: string, data: any) {
+  const client = clients.get(clientId);
+  if (!client) return;
+
+  const teammatePeerId = data.to;
+  const teammate = Array.from(clients.values()).find(
+    (c) => c.id === teammatePeerId && c.roomId === client.roomId
+  );
+
+  if (teammate) {
+    teammate.socket.send(
+      JSON.stringify({
+        type: "SCREENWATCH_ANSWER",
+        answer: data.answer,
+        from: clientId
+      })
+    );
+  }
+}
+
+function handleScreenwatchICE(clientId: string, data: any) {
+  const client = clients.get(clientId);
+  if (!client) return;
+
+  const teammatePeerId = data.to;
+  const teammate = Array.from(clients.values()).find(
+    (c) => c.id === teammatePeerId && c.roomId === client.roomId
+  );
+
+  if (teammate) {
+    teammate.socket.send(
+      JSON.stringify({
+        type: "SCREENWATCH_ICE_CANDIDATE",
+        candidate: data.candidate,
+        from: clientId
+      })
+    );
+  }
+}
+
 function handleKillEvent(clientId: string, data: any) {
   const client = clients.get(clientId);
   if (!client) return;
@@ -89,14 +214,12 @@ function handleKillEvent(clientId: string, data: any) {
   const gameServer = gameServers.get(client.roomId);
   if (!gameServer) return;
 
-  // Record kill in game state
   console.log(
     `💀 Kill: ${data.killerId} (Team ${data.killerTeam}) killed ${data.victimId} with ${data.weapon}`
   );
 
   gameServer.recordKill(data.killerId, data.victimId, data.weapon);
 
-  // Broadcast kill event to all players in room
   const roomClients = Array.from(clients.values()).filter(
     (c) => c.roomId === client.roomId
   );
@@ -111,7 +234,7 @@ function handleKillEvent(clientId: string, data: any) {
 
   for (const roomClient of roomClients) {
     try {
-      roomClient.ws.send(killMessage);
+      roomClient.socket.send(killMessage);
     } catch (e) {
       console.error(`Failed to broadcast kill to ${roomClient.id}:`, e);
     }
@@ -134,136 +257,12 @@ function handleProjectileFired(clientId: string, data: any) {
   console.log(`🚀 Projectile: ${data.shooterId} fired ${data.weapon}`);
 }
 
-function handlePlayerJoin(clientId: string, ws: any, data: any) {
-  const { roomId, teamId, playerId } = data;
-
-  console.log(`🎮 Player ${playerId} joining room ${roomId} (team ${teamId})`);
-
-  // Register client
-  const client: ClientConnection = {
-    id: clientId,
-    ws,
-    roomId,
-    teamId,
-    playerId
-  };
-  clients.set(clientId, client);
-
-  // Get or create game server for this room
-  if (!gameServers.has(roomId)) {
-    console.log(`📦 Creating game server for room: ${roomId}`);
-    const gameServer = new GameServer2v2(roomId);
-    gameServers.set(roomId, gameServer);
-
-    // Start game tick loop (72 Hz)
-    startGameLoop(roomId, gameServer);
-  }
-
-  const gameServer = gameServers.get(roomId)!;
-
-  // Register player with game server
-  gameServer.registerPlayer(clientId, teamId, playerId, ws);
-
-  // Send join confirmation
-  ws.send(
-    JSON.stringify({
-      type: "PLAYER_JOIN_CONFIRMED",
-      clientId,
-      roomId,
-      playerId
-    })
-  );
-}
-
-function handlePlayerInput(clientId: string, data: any) {
-  const client = clients.get(clientId);
-  if (!client) return;
-
-  const gameServer = gameServers.get(client.roomId);
-  if (!gameServer) return;
-
-  // Forward input to server (binary buffer)
-  gameServer.processPlayerInput(clientId, data.data);
-}
-
-function handleScreenwatchOffer(clientId: string, data: any) {
-  const client = clients.get(clientId);
-  if (!client) return;
-
-  const gameServer = gameServers.get(client.roomId);
-  if (!gameServer) return;
-
-  // Forward offer to teammate
-  const teammatePeerId = data.to;
-  const teammate = Array.from(clients.values()).find(
-    (c) => c.id === teammatePeerId && c.roomId === client.roomId
-  );
-
-  if (teammate) {
-    teammate.ws.send(
-      JSON.stringify({
-        type: "SCREENWATCH_OFFER",
-        offer: data.offer,
-        from: clientId
-      })
-    );
-  }
-}
-
-function handleScreenwatchAnswer(clientId: string, data: any) {
-  const client = clients.get(clientId);
-  if (!client) return;
-
-  const teammatePeerId = data.to;
-  const teammate = Array.from(clients.values()).find(
-    (c) => c.id === teammatePeerId && c.roomId === client.roomId
-  );
-
-  if (teammate) {
-    teammate.ws.send(
-      JSON.stringify({
-        type: "SCREENWATCH_ANSWER",
-        answer: data.answer,
-        from: clientId
-      })
-    );
-  }
-}
-
-function handleScreenwatchICE(clientId: string, data: any) {
-  const client = clients.get(clientId);
-  if (!client) return;
-
-  const teammatePeerId = data.to;
-  const teammate = Array.from(clients.values()).find(
-    (c) => c.id === teammatePeerId && c.roomId === client.roomId
-  );
-
-  if (teammate) {
-    teammate.ws.send(
-      JSON.stringify({
-        type: "SCREENWATCH_ICE_CANDIDATE",
-        candidate: data.candidate,
-        from: clientId
-      })
-    );
-  }
-}
-
 function startGameLoop(roomId: string, gameServer: GameServer2v2) {
   const tickRate = 72;
-  const deltaTime = 1 / tickRate;
-  let lastTime = Date.now();
 
   const interval = setInterval(() => {
-    const now = Date.now();
-    const elapsed = (now - lastTime) / 1000;
-    lastTime = now;
-
-    // Update game server
     gameServer.update();
 
-    // Broadcast state to all players in room
     const roomClients = Array.from(clients.values()).filter(
       (c) => c.roomId === roomId
     );
@@ -279,7 +278,7 @@ function startGameLoop(roomId: string, gameServer: GameServer2v2) {
 
     for (const client of roomClients) {
       try {
-        client.ws.send(stateMessage);
+        client.socket.send(stateMessage);
       } catch (e) {
         console.error(`Failed to send state to ${client.id}:`, e);
       }
@@ -287,4 +286,5 @@ function startGameLoop(roomId: string, gameServer: GameServer2v2) {
   }, Math.floor(1000 / tickRate));
 }
 
-console.log("✨ Server ready for connections");
+serve(handler, { hostname: "0.0.0.0", port: 8000 });
+console.log("✨ Server ready for connections on ws://0.0.0.0:8000");
