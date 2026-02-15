@@ -6,12 +6,13 @@ import { ScreenwatchClient } from './screenwatch_client.js';
 import { ScreenwatchUI } from './screenwatch_ui.js';
 import { ARENA_MAP, createArenaGeometry } from './map_arena.js';
 import { serializePlayerInput, serializeEntityUpdate } from './network_protocol_2v2.js';
+import { NetworkClient } from './network_client.js';
 
 export class GameLoop2v2 {
-  constructor(renderer, scene, networkHandler) {
+  constructor(renderer, scene, networkClient = null) {
     this.renderer = renderer;
     this.scene = scene;
-    this.networkHandler = networkHandler;
+    this.networkClient = networkClient;
     
     // Player state
     this.localPlayer = null;
@@ -26,7 +27,7 @@ export class GameLoop2v2 {
     this.screenwatchUI = null;
   }
 
-  async initialize(localPlayerId, teamId, teammatePeerId) {
+  async initialize(localPlayerId, teamId, teammatePeerId, roomId = 'dev-room') {
     console.log('Initializing game loop...');
     
     // Create arena geometry
@@ -41,41 +42,95 @@ export class GameLoop2v2 {
     // Create input handler
     this.inputHandler = new InputHandler(this.renderer.domElement);
     
+    // Connect to server if network client provided
+    if (this.networkClient) {
+      await this.connectToServer(roomId, teamId, localPlayerId);
+    }
+    
     // Initialize screenwatch
     await this.initializeScreenwatch(teammatePeerId);
     
     console.log('Game loop initialized');
   }
 
+  async connectToServer(roomId, teamId, playerId) {
+    try {
+      await this.networkClient.connect();
+      
+      // Register with server
+      this.networkClient.send({
+        type: 'PLAYER_JOIN',
+        roomId,
+        teamId,
+        playerId
+      });
+      
+      // Handle server messages
+      this.networkClient.on('PLAYER_JOIN_CONFIRMED', (data) => {
+        console.log('✅ Joined server:', data);
+      });
+      
+      this.networkClient.on('ENTITY_UPDATE', (data) => {
+        this.receiveEntityUpdate(data);
+      });
+      
+      this.networkClient.on('MATCH_START', (data) => {
+        console.log('🎮 Match started!');
+      });
+      
+      this.networkClient.on('SCREENWATCH_OFFER', (data) => {
+        this.screenwatch.receiveOffer(data.offer);
+      });
+      
+      this.networkClient.on('SCREENWATCH_ANSWER', (data) => {
+        this.screenwatch.receiveAnswer(data.answer);
+      });
+      
+      this.networkClient.on('SCREENWATCH_ICE_CANDIDATE', (data) => {
+        this.screenwatch.receiveICECandidate(data.candidate);
+      });
+    } catch (e) {
+      console.error('Failed to connect to server:', e);
+    }
+  }
+
   async initializeScreenwatch(teammatePeerId) {
     const signalingChannel = {
       sendOffer: (offer) => {
-        this.networkHandler.sendMessage({
-          type: 'SCREENWATCH_OFFER',
-          offer: offer,
-          to: teammatePeerId
-        });
+        if (this.networkClient) {
+          this.networkClient.send({
+            type: 'SCREENWATCH_OFFER',
+            offer: offer,
+            to: teammatePeerId
+          });
+        }
       },
       sendAnswer: (answer) => {
-        this.networkHandler.sendMessage({
-          type: 'SCREENWATCH_ANSWER',
-          answer: answer,
-          to: teammatePeerId
-        });
+        if (this.networkClient) {
+          this.networkClient.send({
+            type: 'SCREENWATCH_ANSWER',
+            answer: answer,
+            to: teammatePeerId
+          });
+        }
       },
       sendICECandidate: (candidate) => {
-        this.networkHandler.sendMessage({
-          type: 'SCREENWATCH_ICE_CANDIDATE',
-          candidate: candidate,
-          to: teammatePeerId
-        });
+        if (this.networkClient) {
+          this.networkClient.send({
+            type: 'SCREENWATCH_ICE_CANDIDATE',
+            candidate: candidate,
+            to: teammatePeerId
+          });
+        }
       },
       sendScreenshot: (jpegData) => {
-        this.networkHandler.sendMessage({
-          type: 'SCREENWATCH_SCREENSHOT',
-          data: jpegData,
-          to: teammatePeerId
-        });
+        if (this.networkClient) {
+          this.networkClient.send({
+            type: 'SCREENWATCH_SCREENSHOT',
+            data: jpegData,
+            to: teammatePeerId
+          });
+        }
       }
     };
     
@@ -117,25 +172,26 @@ export class GameLoop2v2 {
   }
 
   sendPlayerInput(inputState) {
+    if (!this.networkClient) return;
+    
     const serialized = serializePlayerInput(inputState);
-    this.networkHandler.sendUnreliable({
+    this.networkClient.send({
       type: 'PLAYER_INPUT',
-      data: serialized,
+      data: Array.from(new Uint8Array(serialized)),
       timestamp: this.gameTime
     });
   }
 
-  receiveEntityUpdate(updateData) {
-    // Deserialize and apply entity updates from server
-    const data = JSON.parse(updateData);
+  receiveEntityUpdate(data) {
+    // Update remote players from server state
+    if (!data.players) return;
     
-    // Update remote players
     for (const playerData of data.players) {
       if (playerData.id === this.localPlayer.id) continue;  // Skip local player
       
       if (!this.remotePlayers.has(playerData.id)) {
         const remotePlayer = new PlayerController(
-          new THREE.Vector3(playerData.pos.x, playerData.pos.y, playerData.pos.z)
+          new (require('three')).Vector3(playerData.position.x, playerData.position.y, playerData.position.z)
         );
         remotePlayer.id = playerData.id;
         this.remotePlayers.set(playerData.id, remotePlayer);
@@ -143,10 +199,10 @@ export class GameLoop2v2 {
       
       const remotePlayer = this.remotePlayers.get(playerData.id);
       remotePlayer.setState({
-        position: playerData.pos,
-        velocity: playerData.vel,
-        isGrounded: true,
-        stamina: 100
+        position: playerData.position,
+        velocity: playerData.velocity,
+        isGrounded: playerData.isGrounded,
+        stamina: playerData.sprintStamina
       });
     }
   }

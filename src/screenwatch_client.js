@@ -21,6 +21,7 @@ export class ScreenwatchClient {
   async initialize(teammatePeerId, signalingChannel) {
     try {
       this.signalingChannel = signalingChannel;
+      this.teammatePeerId = teammatePeerId;
       this.updateStatus('connecting');
       
       // Create peer connection
@@ -83,6 +84,29 @@ export class ScreenwatchClient {
     const canvas = this.renderer.domElement;
     const stream = canvas.captureStream(fps);
     return stream;
+  }
+
+  receiveOffer(offer) {
+    if (!this.peerConnection) {
+      console.error('PeerConnection not initialized');
+      return;
+    }
+
+    (async () => {
+      try {
+        await this.peerConnection.setRemoteDescription(new RTCSessionDescription(offer));
+        
+        // Create answer
+        const answer = await this.peerConnection.createAnswer();
+        await this.peerConnection.setLocalDescription(answer);
+        
+        // Send answer back
+        this.signalingChannel.sendAnswer(answer);
+      } catch (error) {
+        console.error('Failed to handle offer:', error);
+        this.updateStatus('failed');
+      }
+    })();
   }
 
   async receiveAnswer(answer) {

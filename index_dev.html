@@ -1,0 +1,75 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>End of Times - Development Build</title>
+  <style>
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+    body {
+      font-family: Arial, sans-serif;
+      background: #0a0a0a;
+      color: #0f0;
+      overflow: hidden;
+    }
+    canvas {
+      display: block;
+      width: 100vw;
+      height: 100vh;
+    }
+    #loading {
+      position: absolute;
+      top: 50%;
+      left: 50%;
+      transform: translate(-50%, -50%);
+      text-align: center;
+      background: rgba(0, 0, 0, 0.8);
+      padding: 30px;
+      border-radius: 8px;
+      z-index: 999;
+    }
+    #loading h1 {
+      font-size: 24px;
+      margin-bottom: 15px;
+      color: #0f0;
+    }
+    #loading p {
+      font-size: 14px;
+      margin: 10px 0;
+    }
+    #loading-progress {
+      width: 200px;
+      height: 20px;
+      background: #333;
+      border: 1px solid #0f0;
+      margin-top: 20px;
+      position: relative;
+      overflow: hidden;
+    }
+    #loading-progress::after {
+      content: '';
+      position: absolute;
+      left: 0;
+      top: 0;
+      height: 100%;
+      width: 0%;
+      background: #0f0;
+      transition: width 0.2s;
+    }
+  </style>
+</head>
+<body>
+  <div id="loading">
+    <h1>🎮 End of Times</h1>
+    <p>Development Build</p>
+    <p>Loading...</p>
+    <div id="loading-progress"></div>
+  </div>
+
+  <script type="module" src="main_dev.js"></script>
+</body>
+</html>
