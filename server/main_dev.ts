@@ -68,9 +68,70 @@ function handleMessage(clientId: string, ws: any, data: any) {
     case "SCREENWATCH_ICE_CANDIDATE":
       handleScreenwatchICE(clientId, data);
       break;
+    case "KILL_EVENT":
+      handleKillEvent(clientId, data);
+      break;
+    case "HITSCAN_FIRE":
+      handleHitscanFire(clientId, data);
+      break;
+    case "PROJECTILE_FIRED":
+      handleProjectileFired(clientId, data);
+      break;
     default:
       console.log(`Unknown message type: ${type}`);
   }
+}
+
+function handleKillEvent(clientId: string, data: any) {
+  const client = clients.get(clientId);
+  if (!client) return;
+
+  const gameServer = gameServers.get(client.roomId);
+  if (!gameServer) return;
+
+  // Record kill in game state
+  console.log(
+    `💀 Kill: ${data.killerId} (Team ${data.killerTeam}) killed ${data.victimId} with ${data.weapon}`
+  );
+
+  gameServer.recordKill(data.killerId, data.victimId, data.weapon);
+
+  // Broadcast kill event to all players in room
+  const roomClients = Array.from(clients.values()).filter(
+    (c) => c.roomId === client.roomId
+  );
+
+  const killMessage = JSON.stringify({
+    type: "KILL_EVENT",
+    killerId: data.killerId,
+    victimId: data.victimId,
+    weapon: data.weapon,
+    timestamp: Date.now()
+  });
+
+  for (const roomClient of roomClients) {
+    try {
+      roomClient.ws.send(killMessage);
+    } catch (e) {
+      console.error(`Failed to broadcast kill to ${roomClient.id}:`, e);
+    }
+  }
+}
+
+function handleHitscanFire(clientId: string, data: any) {
+  const client = clients.get(clientId);
+  if (!client) return;
+
+  console.log(
+    `🔫 Hitscan: ${data.shooterId} fired ${data.weapon} at ${data.victimId}`
+  );
+}
+
+function handleProjectileFired(clientId: string, data: any) {
+  const client = clients.get(clientId);
+  if (!client) return;
+
+  console.log(`🚀 Projectile: ${data.shooterId} fired ${data.weapon}`);
 }
 
 function handlePlayerJoin(clientId: string, ws: any, data: any) {

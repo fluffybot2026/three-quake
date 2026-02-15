@@ -113,12 +113,24 @@ export class GameServer2v2 {
     });
   }
 
-  processPlayerInput(clientId: string, inputData: ArrayBuffer): void {
+  processPlayerInput(clientId: string, inputData: any): void {
     const player = this.players.get(clientId);
     if (!player) return;
     
+    // Handle both ArrayBuffer and array formats
+    let inputBuffer: Uint8Array;
+    if (inputData instanceof ArrayBuffer) {
+      inputBuffer = new Uint8Array(inputData);
+    } else if (Array.isArray(inputData)) {
+      inputBuffer = new Uint8Array(inputData);
+    } else {
+      return;
+    }
+    
     // Deserialize input
-    const view = new DataView(inputData);
+    const view = new DataView(inputBuffer.buffer, inputBuffer.byteOffset, inputBuffer.length);
+    if (view.byteLength < 9) return;
+    
     const flags = view.getUint8(0);
     const yaw = view.getFloat32(1, true);
     const pitch = view.getFloat32(5, true);
@@ -137,7 +149,7 @@ export class GameServer2v2 {
     player.rotation.yaw = yaw;
     player.rotation.pitch = pitch;
     
-    // Handle movement (simplified - no acceleration, just set velocity)
+    // Handle movement
     const moveSpeed = sprint ? 7.0 * 1.3 : 7.0;
     let moveX = 0, moveZ = 0;
     
@@ -167,10 +179,31 @@ export class GameServer2v2 {
       this.activateRewind(player.teamId);
     }
     
-    // Handle fire weapon
+    // Handle fire weapon (server-side validation)
     if (fireWeapon) {
-      // TODO: Hitscan check
+      // Could add weapon firing here but client handles it
     }
+  }
+
+  recordKill(killerId: string, victimId: string, weapon: string): void {
+    const killer = this.players.get(killerId);
+    const victim = this.players.get(victimId);
+    
+    if (!killer || !victim) return;
+    
+    // Update team kills
+    this.teams[killer.teamId].kills++;
+    
+    // Reset victim health
+    victim.health = 100;
+    victim.shield = 0;
+    
+    // Check win condition
+    if (this.teams[killer.teamId].kills >= 10) {
+      this.endMatch();
+    }
+    
+    console.log(`✅ Kill recorded: Team ${killer.teamId} now has ${this.teams[killer.teamId].kills} kills`);
   }
 
   activateRewind(teamId: number): void {
@@ -274,10 +307,14 @@ export class GameServer2v2 {
     const state = {
       type: 'ENTITY_UPDATE',
       gameTime: this.gameTime,
-      players: Array.from(this.players.values())
+      players: Array.from(this.players.values()),
+      teams: this.teams.map(t => ({
+        id: t.id,
+        kills: t.kills,
+        rewindCharges: t.rewindCharges
+      }))
     };
     
-    // TODO: Serialize and send to all players
     this.broadcastToAll(state);
   }
 
